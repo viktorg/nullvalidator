@@ -2,7 +2,7 @@ ASSESSMe.py
 ===============================================
 Assess Statistical Estimates from Shotgun Proteomics Scoring Methods
 -----------------------------------------------
-The program helps to validate the accuracy, or calibration, of statistical scores estimated for peptide-spectrum matches (PSMs) or peptides in Shotgun proteomics. The procedure, called the semi-labelled calibration test, is described in:  "On Using Samples of Known Protein Content to Assess the Statistical Calibration of Scores Assigned to Peptide-Spectrum Matches in Shotgun Proteomics" by **Granholm et al.**, *Journal of Proteome Research*, 2011. The program, ASSESSMe.py, is a python program ran from the command line.
+The program helps to validate the accuracy, or calibration, of statistical scores estimated for peptide-spectrum matches (PSMs) or peptides in Shotgun proteomics. The procedure, called the semi-labelled calibration test, is described in:  "On Using Samples of Known Protein Content to Assess the Statistical Calibration of Scores Assigned to Peptide-Spectrum Matches in Shotgun Proteomics" by **Granholm et al.**, *Journal of Proteome Research*, 2011. The program, ASSESSMe.py, is a python program ran from the command line, preferably on a UNIX system.
 
 Workflow:
 - Get MS/MS spectra from a sample of known protein content. One example is the ISB18 mix, available on https://regis-web.systemsbiology.net/PublicDatasets/
