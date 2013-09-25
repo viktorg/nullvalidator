@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Assess Statistical Estimates from Shotgun Proteomics Scoring Methods: ASSESSMe.py
+# nullvalidator.py
 
 #   Copyright 2013 Viktor Granholm, Stockholm University
 #   Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,7 +26,7 @@ class Documentation(object):
         self.entrapment_prefix = 'entrapment_'  # Entrapment proteins always starts with this prefix
 
     def get_greeting(self):
-        return 'Assess Statistical Estimates from Shotgun Proteomics Scoring Methods: %s' % (self.program_name)
+        return 'Validate the calibration of null statistics for shotgun proteomics results: %s' % (self.program_name)
 
     def get_mode_description(self):
         return 'Running in mode: %s' % (self.mode.title())
@@ -367,7 +367,7 @@ class NoMode(Documentation):
 
 def main():
     '''
-    ASSESSMe: Assess Statistical Estimates from Shotgun Proteomics Scoring Methods
+    nullvalidator, validate the calibration of null statistics for shotgun proteomics results
     '''
     # Read through first arguments and decide on in which mode to run
     if len(sys.argv) < 2:
