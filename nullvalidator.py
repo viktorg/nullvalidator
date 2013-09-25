@@ -13,7 +13,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-
+import os
 import sys
 import random
 import matplotlib.pyplot as plt
@@ -26,15 +26,14 @@ class Documentation(object):
         self.entrapment_prefix = 'entrapment_'  # Entrapment proteins always starts with this prefix
 
     def get_greeting(self):
-        return 'Validate the calibration of null statistics for shotgun proteomics results: %s' % (self.program_name)
+        return '%s\nValidate the calibration of null statistics for shotgun proteomics results' % (self.program_name)
 
     def get_mode_description(self):
-        return 'Running in mode: %s' % (self.mode.title())
+        return 'Running in mode: %s\n' % (self.mode.title())
 
     def print_mode_help(self):
         '''Print documentation about this mode'''
         help = []
-        help.append('')
         help.append('Usage: %s %s [options]' % (self.argv[0], self.mode))
         help.append('')
         help.append('Options:')
@@ -222,10 +221,12 @@ class CalibrationMode(Documentation):
         # Default parameters
         self.identification_path = 'known_proteins.fasta'
         self.figure_path = 'qqplot.png'
+        self.html_path = 'calibration.html'
         # Define options
         input_options = Option('-i', '--input', 'File with a pvalue and a protein ID on each line')
+        html_options = Option('-o', '--output', 'Path to output HTML file')
         plot_options = Option('-p', '--plot_path', 'Path to output Q-Q plot')
-        self.mode_options = [input_options, plot_options]
+        self.mode_options = [input_options, html_options, plot_options]  # Make list of all options, for documentation
         # Parse options
         if len(argv) < 3:
             self.print_mode_help()
@@ -235,6 +236,9 @@ class CalibrationMode(Documentation):
             if argv[index] in input_options:
                 index += 1
                 self.identification_path = argv[index]
+            elif argv[index] in html_options:
+                index += 1
+                self.html_path = argv[index]
             elif argv[index] in plot_options:
                 index += 1
                 self.figure_path = argv[index]
@@ -250,7 +254,8 @@ class CalibrationMode(Documentation):
         ideal_pvalues = self.get_uniform_distribution(len(pvalues))
         self.make_qqplot(pvalues, ideal_pvalues, self.figure_path)
         dvalue = self.run_kstest(pvalues, ideal_pvalues)
-        self.make_calibration_statement(dvalue, self.figure_path)
+        self.make_html_output(dvalue, len(pvalues))
+        print '\nResults:\nD value: %s\nQuantile-quantile plot: %s' % (dvalue, self.figure_path)
         
     def import_pvalues(self, filepath, protein_prefix):
         '''Take a file with pvalues and protein IDs, output list of entrapment pvalues
@@ -282,8 +287,8 @@ class CalibrationMode(Documentation):
         over_line = [i*2 for i in line_a]
         lower_line = [i/2 for i in line_a]
         plt.plot(line_a, line_b, c='black')
-        plt.plot(line_a, over_line, c='grey')
-        plt.plot(line_a, lower_line, c='grey')
+        plt.plot(line_a, over_line, c='grey', linestyle='--')
+        plt.plot(line_a, lower_line, c='grey', linestyle='--')
         plt.xlim([lower_limit, 1])
         plt.ylim([lower_limit, 1])
         plt.xscale('log')
@@ -327,20 +332,51 @@ class CalibrationMode(Documentation):
             value += interval
         return values
 
-    def make_calibration_statement(self, dvalue, figure_path):
+    def make_html_output(self, dvalue, entrapment_count):
         '''Print a statement about the calibration
         Arguments:
         dvalue - float of KS-test D-value from calibration
         figure_path - string with path to outputted Q-Q plot
         '''
-        statement = ['']
-        statement.append('A Q-Q plot of the calibration has been printed to: %s' % (figure_path))
-        statement.append('The more closely the red point lie to the diagonal, the better calibrated are the p-values')
-        statement.append('')
-        statement.append('A Kolmogorov-Smirnov test estimated the distance between estimated and ideal p-values to be:')
-        statement.append('D-value: %s' % (dvalue))
-        statement.append('This number should be as low as possible, preferably less than 0.1')
-        print '\n'.join(statement)
+        html = open(self.html_path, 'w')
+        html.write('<HTML>\n')
+        html.write('<HEAD>\n<TITLE>Statistical calibration</TITLE>\n</HEAD>\n')
+        html.write('<BODY>\n')
+        html.write('<H2>nullvalidator.py automatic output</H2>\n')
+        html.write('''
+This page shows the results from a validation of the calibration of null statistics for
+shotgun proteomics results. For a detailed description of the method, please refer to the publication:<br>
+<a href="http://pubs.acs.org/doi/abs/10.1021/pr1012619">"On Using Samples of Known Protein Content to Assess
+the Statistical Calibration of Scores Assigned to Peptide-Spectrum Matches in Shotgun Proteomics"</a> by <b>
+Granholm <i>et al.</i></b>, <i>Journal of Proteome Research</i>, 2011.<br>''')
+        html.write('<H4>Guidelines for interpretation</H4>\n')
+        html.write('''
+The program nullvalidator.py selects only <i>p</i> values of PSMs (or peptides) that map \
+to the entrapment partition of a bipartite database, as these "incorrect" identifications make up a good null
+model. If the statistical estimation procedure is accurate, these null <i>p</i> values should follow a uniform
+distribution. The Kolmogorov-Smirnov test <i>D</i> value is a measure of how distantly the null <i>p</i> values
+are distributed relative the uniform distribution. A low <i>D</i> value indicates high similarity to the uniform
+distribution. The quantile-quantile shows the reported null <i>p</i> values plotted against an ideal null
+distribution, the closer the points lie to the <i>x=y</i> diagonal, the more uniform they are. The dashed grey
+lines represent the lines <i>x=2y</i> and <i>x=y/2</i>. In short:\n''')
+        html.write('<UL>\n')
+        html.write('<LI>A <i>D</i> value greater than 0.1 is generally not good (poor calibration).\n')
+        html.write('<LI>If many points consistently lie outside the dashed grey lines, it\'s a bad sign (poor calibration).\n')
+        html.write('</UL>\n')
+        html.write('<H4>Summary of input</H4>\n')
+        html.write('Path to input file with <i>p</i> values and protein names: <b>%s</b><br>\n' % (self.identification_path))
+        html.write('Protein prefix to recognize entrapment identifications: <b>%s</b><br>\n' % (self.entrapment_prefix))
+        html.write('<h4>Summary of output</h4>\n')
+        html.write('Number of entrapment identifications found: <b>%s</b><br>\n' % (entrapment_count))
+        html.write('Path to quantile-quantile plot: <b>%s</b><br>\n' % (self.figure_path))
+        html.write('Kolomogorov-Smirnov test <i>D</i> value: <b>%s</b><br>\n' % (dvalue))
+        html.write('Quantile-quantile plot: <b>See below</b><br>\n')
+        html.write('<img src="%s"><br><br><br>\n' % (self.figure_path))
+        html.write('</BODY>\n')
+        html.write('</HTML>\n')
+        html.close()
+        print 'Wrote results summary to %s, go to this address from a browser' % (self.html_path)
+        print 'file://%s' % (os.path.abspath(self.html_path))
 
 class NoMode(Documentation):
     def __init__(self, argv):
