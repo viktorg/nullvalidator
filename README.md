@@ -13,6 +13,6 @@ Workflow:
 
 - Search the spectra against the target *bipartite* database and the decoy database, and estimate *p* values for each PSM or peptide.
 
-- Run nullvaidator.py in 'calibration' mode, and give it a file with a *p* value and a protein id, on each line.
+- Run nullvalidator.py in 'calibration' mode, and give it a file with a *p* value and a protein id, on each line.
 
 - nullvalidator.py in 'calibration' mode tries to validate that the *p* values assigned to incorrect *entrapment* identifications are uniformly distributed. Interpret the output quantile-quantile plot and Kolmogorov-Smirnov test *D* value to see whether this is the case.
