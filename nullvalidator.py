@@ -61,6 +61,90 @@ class FastaEntry(object):
         return '\n'.join(lines) + '\n'
 
 
+class PercolatorXML(object):
+    '''Class that holds Percolator XML objects'''
+    def __init__(self, filepath):
+        from lxml import etree  # Importing here makes the program less dependent
+        self.filepath = filepath
+        parser = etree.XMLParser(ns_clean=False, huge_tree=False)        
+        self.tree = etree.parse(self.filepath, parser)
+        self.ns = self.get_namespace()
+
+    def get_namespace(self):
+        root_element = self.tree.getroot()
+        schema_location = root_element.attrib['{http://www.w3.org/2001/XMLSchema-instance}schemaLocation']
+        for format_name in ['percolator_in', 'percolator_out']:
+            for ns_number in [11, 12, 13, 14]:
+                namespace = 'http://per-colator.com/%s/%s' % (format_name, ns_number)
+                if namespace in schema_location:
+                    return namespace
+
+    def get_type(self):
+        if 'percolator_in' in self.ns:
+            return 'percolator_in'
+        else:
+            return 'percolator_out'
+
+    def get_feature_names(self):
+        '''Output a list of all the feature names in the pin file'''
+        feature_names = []
+        for element in self.tree.findall('{%s}featureDescriptions/{%s}featureDescription' % (self.ns, self.ns)):
+            name = element.attrib['name']
+            feature_names.append(name)
+        return feature_names
+
+    def get_feature_values(self, feature_index, isDecoy=False, type_func=float):
+        '''Extract all features values for a given feature, and output a list (first feature has index 0)'''
+        values = []
+        for element in self.tree.findall('{%s}fragSpectrumScan/{%s}peptideSpectrumMatch' % (self.ns, self.ns)):
+            element_isDecoy = element.attrib['isDecoy'] == 'true'  # Convert element string boolean to boolean
+            if isDecoy == element_isDecoy:
+                feature_element = element.findall('{%s}features/{%s}feature' % (self.ns, self.ns))[feature_index]
+                feature_value = feature_element.text
+                values.append(type_func(feature_value))  # type_func: float(), int(), etc...
+        return values
+
+
+class PValueList(list):
+    '''Extended list object that holds pvalues from a particular set of scores'''
+    def __init__(self, title, pvalues=[], target_scores=[], decoy_scores=[]):
+        '''Take a title, and either pre-estimates pvalues, or scores to estimate pvalues
+        Arguments:
+        title - A string title to print in the output
+        pvalues - A list of float pvalues, could be empty
+        target_scores - A list of float target scores, not needed if pvalues is populated
+        decoy_scores - A list of float decoy scores, not needed if pvalues is populated
+        '''
+        list.__init__(self, pvalues)
+        self.title = title
+        self.target_scores = target_scores
+        self.decoy_scores = decoy_scores
+        if len(self) == 0:  # No pvalues were supplied
+            self._run_target_decoy_pvalues()
+
+    def _run_target_decoy_pvalues(self):
+        '''Run a target-decoy analysis on target and decoy scores'''
+        if len(self.target_scores) == 0 or len(self.target_scores) == 0:
+            raise Exception("Can't calculate p values without target or decoy scores")
+        targets = [(value, True) for value in self.target_scores]
+        decoys = [(value, False) for value in self.decoy_scores]
+        all_values = sorted(targets + decoys)
+        sorted_indicators = [i[1] for i in all_values]  # Lowest value first
+        total_decoys = len(decoys)
+        higher_decoys = total_decoys
+        for is_target in sorted_indicators:
+            if is_target:
+                pvalue = (higher_decoys+1.0)/(total_decoys+1.0)  # ((r+1)/(n+1))
+                self.append(pvalue)
+            else:
+                higher_decoys -= 1
+
+    def get_qqplot_filename(self):
+        '''Produce a string from self.title that could be used as filename for plot'''
+        words = [word.lower() for word in self.title.split()]
+        return '_'.join(words) + '.png'
+
+
 class Option(list):
     '''Extended list-object that holds some information about the command line options'''
     def __init__(self, short_flag, long_flag, description, argument_description='<filename>'):
@@ -219,13 +303,13 @@ class CalibrationMode(Documentation):
         print self.get_greeting()
         print self.get_mode_description()
         # Default parameters
-        self.identification_path = 'known_proteins.fasta'
-        self.figure_path = 'qqplot.png'
+        self.identification_path = 'identifications.txt'
+        self.figure_directory = '.'
         self.html_path = 'calibration.html'
         # Define options
-        input_options = Option('-i', '--input', 'File with a pvalue and a protein ID on each line')
+        input_options = Option('-i', '--input', 'File with a pvalue and a protein ID on each line, or pin or pout XML')
         html_options = Option('-o', '--output', 'Path to output HTML file')
-        plot_options = Option('-p', '--plot_path', 'Path to output Q-Q plot')
+        plot_options = Option('-p', '--plot_dir', 'Directory to output Q-Q plot')
         self.mode_options = [input_options, html_options, plot_options]  # Make list of all options, for documentation
         # Parse options
         if len(argv) < 3:
@@ -241,7 +325,7 @@ class CalibrationMode(Documentation):
                 self.html_path = argv[index]
             elif argv[index] in plot_options:
                 index += 1
-                self.figure_path = argv[index]
+                self.figure_directory = argv[index]
             else:
                 print 'Error: Unknown parameter %s' % (argv[index])
                 self.print_mode_help()
@@ -250,15 +334,33 @@ class CalibrationMode(Documentation):
 
     def run(self):
         '''Assess the calibration of null (entrapment) pvalues'''
-        pvalues = self.import_pvalues(self.identification_path, self.entrapment_prefix)
-        ideal_pvalues = self.get_uniform_distribution(len(pvalues))
-        self.make_qqplot(pvalues, ideal_pvalues, self.figure_path)
-        dvalue = self.run_kstest(pvalues, ideal_pvalues)
-        self.make_html_output(dvalue, len(pvalues))
-        print '\nResults:\nD value: %s\nQuantile-quantile plot: %s' % (dvalue, self.figure_path)
+        pvalue_lists = self.import_pvalues()
+        dvalues = []
+        figure_paths = []
+        for pvalues in pvalue_lists:
+            # Get figures and D values
+            ideal_pvalues = self.get_uniform_distribution(len(pvalues))
+            figure_paths.append(self.make_qqplot(pvalues, ideal_pvalues))
+            dvalues.append(self.run_kstest(pvalues, ideal_pvalues))
+        # Make output
+        titles = [pvalues.title for pvalues in pvalue_lists]
+        self.make_html_output(titles, dvalues, figure_paths)
         
-    def import_pvalues(self, filepath, protein_prefix):
-        '''Take a file with pvalues and protein IDs, output list of entrapment pvalues
+    def import_pvalues(self):
+        '''Import pvalues or scores from self.identification_path, output list of entrapment PValueList objects'''
+        infile = open(self.identification_path)
+        first_line = infile.readline()
+        infile.close()
+        if first_line.strip().startswith('<?xml version'):  # Check first line
+            # XML file
+            pvalue_lists = self.read_input_xml(self.identification_path, self.entrapment_prefix)
+        else:
+            # Tab-delimited text file
+            pvalue_lists = self.read_tab_file(self.identification_path, self.entrapment_prefix)
+        return pvalue_lists
+
+    def read_tab_file(self, filepath, protein_prefix):
+        '''Take a path to a file with pvalues and proteins IDs, output list with a PValueList object
         Arguments:
         filepath - string path to file with a p-value and a protein ID on each line
         protein_prefix - string, only store p-values with protein ID's starting with protein_prefix
@@ -270,15 +372,37 @@ class CalibrationMode(Documentation):
             protein_id = words[1]
             if protein_id.startswith(protein_prefix):
                 pvalues.append(pvalue)
-        return pvalues
+        pvalue_list = PValueList('Reported pvalues', pvalues)
+        return [pvalue_list]  # Return in list to work with subsequent for loops
 
-    def make_qqplot(self, reported_pvalues, ideal_pvalues, figure_path):
+    def read_input_xml(self, filepath, protein_prefix):
+        '''Take a path to a pin or pout XML file, output lists with PValueList object
+        Arguments:
+        filepath - string path to a pin- or pout-xml file
+        protein_prefix - string, only store p-values with protein ID's starting with protein_prefix
+        '''
+        pvalue_lists = []
+        xml = PercolatorXML(filepath)
+        if xml.get_type() == 'percolator_in':
+            features = xml.get_feature_names()
+            for feature in features:
+                targets = xml.get_feature_values(feature, is_decoy=False, with_prefix=protein_prefix)
+                decoys = xml.get_features_values(feature, is_decoy=True, with_prefix='')
+                pvalues = PValueList(feature_name, target_scores=targets, decoy_scores=decoys)
+                pvalue_lists.append(pvalues)
+        elif xml.get_type() == 'percolator_out':
+            pvalues = xml.get_pvalues(is_decoy=False, with_prefix=protein_prefix)
+            pvalues = PValue('Percolator pvalues', pvalues)
+            pvalue_lists.append(pvalues)
+        return pvalue_lists
+
+    def make_qqplot(self, reported_pvalues, ideal_pvalues):
         '''Make a log-scale quantile-quantile plot of pvalues, save to filepath
         Arguments:
-        reported_pvalues - list of pvalues reported from statistical estimation method
-        ideal_pvalues - list of ideal (uniform) pvalues
-        figure_path - string to path to print figure
+        reported_pvalues - a PValueList object of pvalues reported from a statistical estimation method
+        ideal_pvalues - a PValueList object of ideal (uniform) pvalues
         '''
+        figure_path = os.path.abspath('%s/%s' % (self.figure_directory, reported_pvalues.get_qqplot_filename()))
         reported_pvalues.sort()
         lower_limit = min(reported_pvalues+ideal_pvalues)*0.1
         # Plot
@@ -295,7 +419,9 @@ class CalibrationMode(Documentation):
         plt.yscale('log')
         plt.xlabel('Ideal $p$ values', fontsize='x-large')
         plt.ylabel('Reported $p$ values', fontsize='x-large')
+        plt.title(reported_pvalues.title)
         plt.savefig(figure_path)
+        return figure_path
 
     def run_kstest(self, a, b):
         '''Kolmogorov-Smirnov tests between two distributions
@@ -332,7 +458,7 @@ class CalibrationMode(Documentation):
             value += interval
         return values
 
-    def make_html_output(self, dvalue, entrapment_count):
+    def make_html_output(self, titles, dvalues, figure_paths):
         '''Print a statement about the calibration
         Arguments:
         dvalue - float of KS-test D-value from calibration
@@ -363,15 +489,17 @@ lines represent the lines <i>x=2y</i> and <i>x=y/2</i>. In short:\n''')
         html.write('<LI>A <i>D</i> value greater than 0.1 is generally not good (poor calibration).\n')
         html.write('<LI>If many points consistently lie outside the dashed grey lines, it\'s a bad sign (poor calibration).\n')
         html.write('</UL>\n')
-        html.write('<H4>Summary of input</H4>\n')
-        html.write('Path to input file with <i>p</i> values and protein names: <b>%s</b><br>\n' % (self.identification_path))
+        html.write('<H3>Summary of input</H3>\n')
+        html.write('Path to input file with <i>p</i> values/scores and protein names: <b>%s</b><br>\n' % (self.identification_path))
         html.write('Protein prefix to recognize entrapment identifications: <b>%s</b><br>\n' % (self.entrapment_prefix))
-        html.write('<h4>Summary of output</h4>\n')
-        html.write('Number of entrapment identifications found: <b>%s</b><br>\n' % (entrapment_count))
-        html.write('Path to quantile-quantile plot: <b>%s</b><br>\n' % (self.figure_path))
-        html.write('Kolomogorov-Smirnov test <i>D</i> value: <b>%s</b><br>\n' % (dvalue))
-        html.write('Quantile-quantile plot: <b>See below</b><br>\n')
-        html.write('<img src="%s"><br><br><br>\n' % (self.figure_path))
+        html.write('<H3>Summary of output</H3>\n')
+        for index, title in enumerate(titles):
+            dvalue = dvalues[index]
+            figure_path = figure_paths[index]
+            html.write('<H4>%s</H4>\n' % (title))
+            html.write('Kolomogorov-Smirnov test <I>D</I> value: <B>%s</B><BR>\n' % (dvalue))
+            html.write('Q-Q plot: <B><A HREF="%s">%s</A></B><BR>\n' % (figure_path, figure_path.split('/')[-1]))  # On UNIX systems
+            html.write('Path to Q-Q plot: <B>%s</B><BR>\n' % (figure_path))
         html.write('</BODY>\n')
         html.write('</HTML>\n')
         html.close()
