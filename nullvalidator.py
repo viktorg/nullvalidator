@@ -64,26 +64,29 @@ class FastaEntry(object):
 class PercolatorXML(object):
     '''Class that holds Percolator XML objects'''
     def __init__(self, filepath):
+        '''Set up XML tree, regardless of whether pout or pin
+        Arguments:
+        filepath - path to XML file
+        '''
         from lxml import etree  # Importing here makes the program less dependent
         self.filepath = filepath
         parser = etree.XMLParser(ns_clean=False, huge_tree=False)        
         self.tree = etree.parse(self.filepath, parser)
-        self.ns = self.get_namespace()
+        self.ns, self.format_type = self._get_namespace()
 
-    def get_namespace(self):
+    def _get_namespace(self):
+        '''Figure out the namespace and whether pin or pout XML'''
         root_element = self.tree.getroot()
         schema_location = root_element.attrib['{http://www.w3.org/2001/XMLSchema-instance}schemaLocation']
-        for format_name in ['percolator_in', 'percolator_out']:
+        for format_type in ['percolator_in', 'percolator_out']:
             for ns_number in [11, 12, 13, 14]:
-                namespace = 'http://per-colator.com/%s/%s' % (format_name, ns_number)
+                namespace = 'http://per-colator.com/%s/%s' % (format_type, ns_number)
                 if namespace in schema_location:
-                    return namespace
+                    return namespace, format_type
 
     def get_type(self):
-        if 'percolator_in' in self.ns:
-            return 'percolator_in'
-        else:
-            return 'percolator_out'
+        '''Return whether xml is a pin or pout XML'''
+        return self.format_type
 
     def get_feature_names(self):
         '''Output a list of all the feature names in the pin file'''
@@ -93,16 +96,54 @@ class PercolatorXML(object):
             feature_names.append(name)
         return feature_names
 
-    def get_feature_values(self, feature_index, isDecoy=False, type_func=float):
-        '''Extract all features values for a given feature, and output a list (first feature has index 0)'''
+    def get_feature_values(self, feature_index, is_decoy=False, with_prefix=''):
+        '''Extract all features values for a given feature, and output a list (first feature has index 0)
+        Arguments:
+        feature_index - integer of the index of the feature
+        Keyword arguments:
+        is_decoy - boolean indicating whether to take target or decoy PSMs
+        with_prefix - string, only choose PSMs with protein occurrence starting with this prefix
+        '''
         values = []
         for element in self.tree.findall('{%s}fragSpectrumScan/{%s}peptideSpectrumMatch' % (self.ns, self.ns)):
-            element_isDecoy = element.attrib['isDecoy'] == 'true'  # Convert element string boolean to boolean
-            if isDecoy == element_isDecoy:
-                feature_element = element.findall('{%s}features/{%s}feature' % (self.ns, self.ns))[feature_index]
-                feature_value = feature_element.text
-                values.append(type_func(feature_value))  # type_func: float(), int(), etc...
+            # Check decoy
+            element_is_decoy = element.attrib['isDecoy'] == 'true'
+            if not is_decoy == element_is_decoy:
+                continue
+            # Check protein prefix
+            occurence = element.find('{%s}occurence' % (self.ns))
+            if not occurence.attrib['proteinId'].startswith(with_prefix):
+                continue
+            # Get feature value
+            feature_element = element.findall('{%s}features/{%s}feature' % (self.ns, self.ns))[feature_index]
+            feature_value = feature_element.text
+            values.append(float(feature_value))
         return values
+
+    def get_pvalues(self, is_decoy=False, with_prefix='', level='psm'):
+        '''For pout XML. Return pvalues of PSMs
+        Arguments:
+        is_decoy - boolean indicating whether to choose target and decoy PSMs
+        with_prefix - string, only choose PSMs with a protein occurrence starting with this prefix
+        level - string, either PSM or peptide, decides what level to look at
+        '''
+        pvalues = []
+        for element in self.tree.findall('{%(n)s}%(l)ss/{%(n)s}%(l)s' % dict(n=self.ns, l=level)):
+            # Check decoy
+            try:
+                if not (element.attrib['{%s}decoy' % (self.ns)] == 'true') == is_decoy:
+                    continue
+            except KeyError:
+                if is_decoy:
+                    sys.exit('KeyError: There seems to be no p:decoy attribute')
+            # Check prefix
+            protein_id = element.find('{%s}protein_id' % (self.ns)).text
+            if not protein_id.startswith(with_prefix):
+                continue
+            # Store pvalue
+            pvalue = float(element.find('{%s}p_value' % (self.ns)).text)
+            pvalues.append(pvalue)
+        return pvalues
 
 
 class PValueList(list):
@@ -117,10 +158,23 @@ class PValueList(list):
         '''
         list.__init__(self, pvalues)
         self.title = title
-        self.target_scores = target_scores
-        self.decoy_scores = decoy_scores
+        self.target_scores = self._untie_scores(target_scores)
+        self.decoy_scores = self._untie_scores(decoy_scores)
         if len(self) == 0:  # No pvalues were supplied
             self._run_target_decoy_pvalues()
+
+    def _untie_scores(self, scores):
+        '''Add small values to duplicate scores, to avoid tied values
+        Arguments:
+        scores - A list of scores with tied values
+        '''
+        scores.sort()
+        untied_scores = []
+        for index, score in enumerate(set(scores)):
+            duplicate_number = scores.count(score)
+            for factor in range(duplicate_number):
+                untied_scores.append(score + factor*0.00000001/duplicate_number)
+        return untied_scores
 
     def _run_target_decoy_pvalues(self):
         '''Run a target-decoy analysis on target and decoy scores'''
@@ -186,7 +240,8 @@ class DatabaseMode(Documentation):
         target_options = Option('-t', '--target', 'Path to output bipartite target fasta file')
         decoy_options = Option('-d', '--decoy', 'Path to output decoy fasta file')
         entrapment_size_options = Option('-e', '--entrap_size', 'Number of times to shuffle sample database to generate entrapments', '<integer>')
-        self.mode_options = [input_options, target_options, decoy_options, entrapment_size_options]
+        prefix_options = Option('-r', '--prefix', 'Prefix of entrapment proteins')
+        self.mode_options = [input_options, target_options, decoy_options, entrapment_size_options, prefix_options]
         # Parse options
         if len(argv) < 3:
             self.print_mode_help()
@@ -205,6 +260,9 @@ class DatabaseMode(Documentation):
             elif argv[index] in entrapment_size_options:
                 index += 1
                 self.entrapment_size = int(argv[index])
+            elif argv[index] in prefix_options:
+                index += 1
+                self.entrapment_prefix = int(argv[index])
             else:
                 print 'Error: Unknown parameter %s' % (argv[index])
                 self.print_mode_help()
@@ -216,9 +274,10 @@ class DatabaseMode(Documentation):
         # Generate and write bipartite target
         sample_sequences = self.import_fasta(self.sample_fasta_path)
         entrapment_sequences = self.shuffle_sequences(sample_sequences, 'shuffle', self.entrapment_size, self.entrapment_prefix)
+        print 'Made entrapment database %s times bigger than the sample database' % (self.entrapment_size)
         bipartite_sequences = sample_sequences + entrapment_sequences
         self.write_fasta(bipartite_sequences, self.target_fasta_path)
-        print '\nWrote target bipartite database to %s' % self.target_fasta_path
+        print 'Wrote target bipartite database to %s' % self.target_fasta_path
         # Generate and write reversed decoy
         decoy_sequences = self.shuffle_sequences(bipartite_sequences, 'reverse', 1, 'reverse_')
         self.write_fasta(decoy_sequences, self.decoy_fasta_path)
@@ -310,7 +369,8 @@ class CalibrationMode(Documentation):
         input_options = Option('-i', '--input', 'File with a pvalue and a protein ID on each line, or pin or pout XML')
         html_options = Option('-o', '--output', 'Path to output HTML file')
         plot_options = Option('-p', '--plot_dir', 'Directory to output Q-Q plot')
-        self.mode_options = [input_options, html_options, plot_options]  # Make list of all options, for documentation
+        prefix_options = Option('-r', '--prefix', 'Prefix of entrapment proteins')
+        self.mode_options = [input_options, html_options, plot_options, prefix_options]
         # Parse options
         if len(argv) < 3:
             self.print_mode_help()
@@ -326,6 +386,9 @@ class CalibrationMode(Documentation):
             elif argv[index] in plot_options:
                 index += 1
                 self.figure_directory = argv[index]
+            elif argv[index] in prefix_options:
+                index += 1
+                self.entrapment_prefix = argv[index]
             else:
                 print 'Error: Unknown parameter %s' % (argv[index])
                 self.print_mode_help()
@@ -384,15 +447,17 @@ class CalibrationMode(Documentation):
         pvalue_lists = []
         xml = PercolatorXML(filepath)
         if xml.get_type() == 'percolator_in':
+            print 'Read pin XML file'
             features = xml.get_feature_names()
-            for feature in features:
-                targets = xml.get_feature_values(feature, is_decoy=False, with_prefix=protein_prefix)
-                decoys = xml.get_features_values(feature, is_decoy=True, with_prefix='')
-                pvalues = PValueList(feature_name, target_scores=targets, decoy_scores=decoys)
+            for index, feature in enumerate(features):
+                targets = xml.get_feature_values(index, is_decoy=False, with_prefix=protein_prefix)
+                decoys = xml.get_feature_values(index, is_decoy=True, with_prefix='')
+                pvalues = PValueList(feature, target_scores=targets, decoy_scores=decoys)
                 pvalue_lists.append(pvalues)
         elif xml.get_type() == 'percolator_out':
+            print 'Read pout XML file'
             pvalues = xml.get_pvalues(is_decoy=False, with_prefix=protein_prefix)
-            pvalues = PValue('Percolator pvalues', pvalues)
+            pvalues = PValueList('Percolator pvalues', pvalues)
             pvalue_lists.append(pvalues)
         return pvalue_lists
 
@@ -421,6 +486,7 @@ class CalibrationMode(Documentation):
         plt.ylabel('Reported $p$ values', fontsize='x-large')
         plt.title(reported_pvalues.title)
         plt.savefig(figure_path)
+        plt.close()
         return figure_path
 
     def run_kstest(self, a, b):
@@ -498,12 +564,12 @@ lines represent the lines <i>x=2y</i> and <i>x=y/2</i>. In short:\n''')
             figure_path = figure_paths[index]
             html.write('<H4>%s</H4>\n' % (title))
             html.write('Kolomogorov-Smirnov test <I>D</I> value: <B>%s</B><BR>\n' % (dvalue))
-            html.write('Q-Q plot: <B><A HREF="%s">%s</A></B><BR>\n' % (figure_path, figure_path.split('/')[-1]))  # On UNIX systems
             html.write('Path to Q-Q plot: <B>%s</B><BR>\n' % (figure_path))
+            html.write('Q-Q plot:<BR><A HREF="%s"><IMG SRC="%s" WIDTH="200"></A><BR>\n' % (figure_path, figure_path))
         html.write('</BODY>\n')
         html.write('</HTML>\n')
         html.close()
-        print 'Wrote results summary to %s, go to this address from a browser' % (self.html_path)
+        print 'Wrote results summary to %s, go to this address from a browser:' % (self.html_path)
         print 'file://%s' % (os.path.abspath(self.html_path))
 
 class NoMode(Documentation):
